@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "functions": {
+    "api/import-xlsx.js": {
+      "maxDuration": 60
+    }
+  }
+}
