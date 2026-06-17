@@ -3,15 +3,7 @@ import { createOdooClient, ensureExternalId, resolveExternalId, OdooClient } fro
 import { parseWorkbookFromBase64, orderedSheets, normalizeAction, emptyToUndefined } from './xlsxWorkbook';
 import { ImportLogEntry, ImportResult, WorkbookRow } from './types';
 import { translateOdooError } from './errorTranslator';
-
-const META_COLUMNS = new Set(['__action', '_external_id', '_model', '_note', '_comment']);
-const ALWAYS_SKIP = new Set(['id', 'display_name', 'create_uid', 'create_date', 'write_uid', 'write_date', '__last_update']);
-
-function relationBase(header: string): { field: string; kind: 'many2one' | 'many2many' } | null {
-  if (header.endsWith('_external_ids')) return { field: header.replace(/_external_ids$/, ''), kind: 'many2many' };
-  if (header.endsWith('_external_id')) return { field: header.replace(/_external_id$/, ''), kind: 'many2one' };
-  return null;
-}
+import { ALWAYS_SKIP, isMetaColumn, normalizeHeader } from './importHeaders';
 
 function asBoolean(value: unknown): boolean {
   if (typeof value === 'boolean') return value;
@@ -42,26 +34,54 @@ function convertScalar(value: unknown, type?: string): unknown {
   return cleaned;
 }
 
-async function resolveMany2One(client: OdooClient, xmlId: string): Promise<number | undefined> {
+async function resolveMany2One(client: OdooClient, xmlId: string, dryRun: boolean): Promise<number | undefined> {
   if (isEmpty(xmlId)) return undefined;
   const found = await resolveExternalId(client, String(xmlId));
-  return found?.res_id;
+  if (found?.res_id) return found.res_id;
+  if (dryRun) return -1; // pseudo-id so dry run can continue and still report intent.
+  return undefined;
 }
 
-async function resolveMany2Many(client: OdooClient, xmlIds: string): Promise<number[]> {
+async function resolveMany2Many(client: OdooClient, xmlIds: string, dryRun: boolean): Promise<number[]> {
   if (isEmpty(xmlIds)) return [];
   const parts = String(xmlIds).split(',').map((x) => x.trim()).filter(Boolean);
   const ids: number[] = [];
   for (const part of parts) {
     const found = await resolveExternalId(client, part);
     if (found?.res_id) ids.push(found.res_id);
+    else if (dryRun) ids.push(-1);
   }
   return ids;
 }
 
 function shouldKeepReadonlyOnCreate(model: string, key: string): boolean {
-  if (model === 'ir.model' && ['model', 'name', 'info'].includes(key)) return true;
+  // `state` on ir.model is an intent column in XLSX but Odoo may reject updating it.
+  // We only keep fields that are actually safe to create/write through XML-RPC.
+  if (model === 'ir.model' && ['model', 'name', 'info', 'transient'].includes(key)) return true;
   return false;
+}
+
+function buildWorkbookFieldFallback(parsed: ReturnType<typeof parseWorkbookFromBase64>): Map<string, Record<string, any>> {
+  const map = new Map<string, Record<string, any>>();
+  const fieldsSheet = parsed.sheets.find((s) => s.inferredModel === 'ir.model.fields' || s.name === 'ir.model.fields');
+  if (!fieldsSheet) return map;
+
+  for (const row of fieldsSheet.rows) {
+    const model = String(row.model || '').trim();
+    const name = String(row.name || '').trim();
+    if (!model || !name) continue;
+    if (!map.has(model)) map.set(model, {});
+    map.get(model)![name] = {
+      name,
+      string: String(row.field_description || name),
+      type: String(row.ttype || 'char'),
+      relation: isEmpty(row.relation) ? undefined : String(row.relation),
+      required: asBoolean(row.required),
+      readonly: asBoolean(row.readonly),
+      store: isEmpty(row.store) ? true : asBoolean(row.store),
+    };
+  }
+  return map;
 }
 
 async function prepareValues(
@@ -70,6 +90,7 @@ async function prepareValues(
   row: WorkbookRow,
   fields: Record<string, any>,
   isUpdate: boolean,
+  dryRun: boolean,
   logs: ImportLogEntry[],
   sheet: string,
   rowNumber: number
@@ -77,9 +98,10 @@ async function prepareValues(
   const values: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(row)) {
-    if (!key || META_COLUMNS.has(key) || ALWAYS_SKIP.has(key)) continue;
-    const rel = relationBase(key);
-    const fieldName = rel?.field || key;
+    if (!key || isMetaColumn(key) || ALWAYS_SKIP.has(key)) continue;
+    const directMeta = fields[key];
+    const normalized = normalizeHeader(key, directMeta?.type);
+    const fieldName = normalized.field;
     const meta = fields[fieldName];
 
     if (!meta) {
@@ -87,22 +109,27 @@ async function prepareValues(
       continue;
     }
 
-    if (meta.readonly && (isUpdate || !shouldKeepReadonlyOnCreate(model, key))) {
+    if (meta.readonly && (isUpdate || !shouldKeepReadonlyOnCreate(model, fieldName))) {
       logs.push({ level: 'info', sheet, row: rowNumber, model, message: `Kolom ${key} dilewati karena readonly.` });
       continue;
     }
 
-    if (rel?.kind === 'many2one') {
-      const id = await resolveMany2One(client, String(value || ''));
-      if (id) values[fieldName] = id;
-      else if (!isEmpty(value)) logs.push({ level: 'warn', sheet, row: rowNumber, model, message: `External ID relation ${value} tidak ditemukan untuk ${fieldName}.` });
-      continue;
-    }
-
-    if (rel?.kind === 'many2many') {
-      const ids = await resolveMany2Many(client, String(value || ''));
-      values[fieldName] = [[6, 0, ids]];
-      continue;
+    if (normalized.relation || ['many2one', 'many2many'].includes(String(meta.type))) {
+      const kind = normalized.relation?.kind === 'many2many' || meta.type === 'many2many' ? 'many2many' : 'many2one';
+      if (kind === 'many2one') {
+        const id = await resolveMany2One(client, String(value || ''), dryRun);
+        if (id) values[fieldName] = id;
+        else if (!isEmpty(value)) logs.push({ level: 'warn', sheet, row: rowNumber, model, message: `External ID relation ${value} tidak ditemukan untuk ${fieldName}.` });
+        continue;
+      }
+      if (kind === 'many2many') {
+        const ids = await resolveMany2Many(client, String(value || ''), dryRun);
+        values[fieldName] = [[6, 0, ids.filter((x) => x > 0)]];
+        if (dryRun && ids.some((x) => x < 0)) {
+          logs.push({ level: 'warn', sheet, row: rowNumber, model, message: `Sebagian external ID many2many untuk ${fieldName} belum ditemukan; dry-run tetap lanjut.` });
+        }
+        continue;
+      }
     }
 
     const converted = convertScalar(value, meta.type);
@@ -112,12 +139,22 @@ async function prepareValues(
   return values;
 }
 
-async function getFields(client: OdooClient, cache: Map<string, Record<string, any>>, model: string) {
+async function getFields(client: OdooClient, cache: Map<string, Record<string, any>>, fallback: Map<string, Record<string, any>>, model: string, dryRun: boolean, logs: ImportLogEntry[], sheet: string) {
   const cached = cache.get(model);
   if (cached) return cached;
-  const fields = await client.fieldsGet(model);
-  cache.set(model, fields);
-  return fields;
+  try {
+    const fields = await client.fieldsGet(model);
+    cache.set(model, fields);
+    return fields;
+  } catch (error) {
+    const fb = fallback.get(model);
+    if (dryRun && fb) {
+      logs.push({ level: 'info', sheet, model, message: `Schema live untuk ${model} belum tersedia; dry-run memakai field dari workbook.` });
+      cache.set(model, fb);
+      return fb;
+    }
+    throw error;
+  }
 }
 
 export async function runImport(base64: string, options: { filename?: string; dryRun?: boolean; confirm?: string }): Promise<ImportResult> {
@@ -138,6 +175,7 @@ export async function runImport(base64: string, options: { filename?: string; dr
 
   const client = await createOdooClient();
   const parsed = parseWorkbookFromBase64(base64, options.filename);
+  const fallbackFields = buildWorkbookFieldFallback(parsed);
   const sheets = orderedSheets(parsed.sheets);
   const fieldCache = new Map<string, Record<string, any>>();
   const result: ImportResult = {
@@ -179,7 +217,7 @@ export async function runImport(base64: string, options: { filename?: string; dr
       }
 
       try {
-        const fields = await getFields(client, fieldCache, model);
+        const fields = await getFields(client, fieldCache, fallbackFields, model, dryRun, result.logs, sheet.name);
         const existing = externalId ? await resolveExternalId(client, externalId) : null;
         const hasExistingForModel = existing && existing.model === model && existing.res_id;
 
@@ -201,7 +239,7 @@ export async function runImport(base64: string, options: { filename?: string; dr
         }
 
         const isUpdate = action === 'update' || (action === 'upsert' && Boolean(hasExistingForModel));
-        const values = await prepareValues(client, model, row, fields, isUpdate, result.logs, sheet.name, rowNumber);
+        const values = await prepareValues(client, model, row, fields, isUpdate, dryRun, result.logs, sheet.name, rowNumber);
 
         if (action === 'update') {
           if (!hasExistingForModel) {

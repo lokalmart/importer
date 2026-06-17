@@ -69,3 +69,33 @@ x_role_ids_external_ids = lm_roles.role_surveyor,lm_roles.role_kasir
 - The importer strips readonly fields and unknown fields during safe repair.
 - Use dry-run before live import.
 - Keep `IMPORTER_ADMIN_TOKEN` enabled on every public Vercel deployment.
+
+## v0.2 fixes
+
+This package fixes the first Vercel prototype behavior where valid business results were incorrectly shown as `Request gagal`.
+
+- Blocked preflight now renders as a preflight result instead of a failed request.
+- Dry-run/import reports now return HTTP 200 even when row-level errors exist, so logs are visible.
+- Logs are saved in browser localStorage and can be downloaded as JSON.
+- Safe Repair now normalizes Odoo native relation headers such as `model_id/id` into `model_id_external_id`.
+- Safe Repair automatically makes the patch workbook active for the next dry-run.
+- Preflight can reuse the schema snapshot already scanned in the UI.
+- Dry-run can simulate custom models defined inside the workbook before they exist in live Odoo.
+
+
+## Template Center
+
+This app includes static import standards in `public/templates/`:
+
+- `/templates/lokalmart_standard_import_template.xlsx`
+- `/templates/lokalmart_ai_template_contract.md`
+- `/templates/lokalmart_template_manifest.json`
+
+All AI-generated XLSX files for Lokalmart should follow these conventions:
+
+- `__action`, `_external_id`, `_model` are required on data sheets.
+- Many2one relation columns use `field_name_external_id`.
+- Many2many relation columns use `field_name_external_ids` with comma-separated external IDs.
+- Product images use `image_1920_base64`.
+- Project hierarchy uses `project.task.parent_id_external_id`.
+- Physical delete is blocked; use `archive` where the target model has `active`.

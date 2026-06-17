@@ -2,20 +2,37 @@ import 'server-only';
 import * as XLSX from 'xlsx';
 import { buildSchemaSnapshot } from './schemaScanner';
 import { makeWorkbookFromSheets, parseWorkbookFromBase64, workbookToBase64 } from './xlsxWorkbook';
-import { ImportIssue, WorkbookRow } from './types';
+import { ImportIssue, WorkbookRow, SchemaSnapshot } from './types';
+import { isMetaColumn, normalizeHeader } from './importHeaders';
 
-const META_COLUMNS = new Set(['__action', '_external_id', '_model', '_note', '_comment']);
+function fallbackSnapshot(): SchemaSnapshot {
+  return {
+    ok: false,
+    exported_at: new Date().toISOString(),
+    target: { url_host: 'offline', db: 'offline', username: 'offline' },
+    models: {},
+    modelList: [],
+    externalIds: [],
+  };
+}
 
-function relationBase(header: string): string | null {
-  if (header.endsWith('_external_ids')) return header.replace(/_external_ids$/, '');
-  if (header.endsWith('_external_id')) return header.replace(/_external_id$/, '');
-  return null;
+async function loadSnapshot(issues: ImportIssue[]): Promise<SchemaSnapshot> {
+  try {
+    return await buildSchemaSnapshot('custom');
+  } catch (error) {
+    issues.push({
+      level: 'warn',
+      message: `Schema live gagal dibaca saat repair. Repair tetap lanjut dengan mode workbook-only. Detail: ${error instanceof Error ? error.message : String(error)}`,
+      code: 'schema_scan_failed_fallback',
+    });
+    return fallbackSnapshot();
+  }
 }
 
 export async function repairWorkbook(base64: string, filename?: string) {
   const parsed = parseWorkbookFromBase64(base64, filename);
-  const snapshot = await buildSchemaSnapshot('custom');
   const issues: ImportIssue[] = [];
+  const snapshot = await loadSnapshot(issues);
   const repairedSheets: Array<{ name: string; rows: WorkbookRow[] }> = [];
 
   for (const sheet of parsed.sheets) {
@@ -32,7 +49,7 @@ export async function repairWorkbook(base64: string, filename?: string) {
 
       for (const [key, value] of Object.entries(row)) {
         if (!key) continue;
-        if (META_COLUMNS.has(key)) {
+        if (isMetaColumn(key)) {
           newRow[key] = value;
           continue;
         }
@@ -42,9 +59,9 @@ export async function repairWorkbook(base64: string, filename?: string) {
           continue;
         }
 
-        const base = relationBase(key);
-        const target = base || key;
-        const meta = schema.fields[target];
+        const directMeta = schema.fields[key];
+        const normalized = normalizeHeader(key, directMeta?.type);
+        const meta = schema.fields[normalized.field];
         if (!meta) {
           issues.push({
             level: 'info',
@@ -69,7 +86,20 @@ export async function repairWorkbook(base64: string, filename?: string) {
           });
           continue;
         }
-        newRow[key] = value;
+
+        const outKey = normalized.relation ? normalized.relation.normalizedHeader : key;
+        if (outKey !== key) {
+          issues.push({
+            level: 'info',
+            sheet: sheet.name,
+            row: index + 2,
+            model: rowModel,
+            field: key,
+            message: `Kolom ${key} dinormalisasi menjadi ${outKey}.`,
+            code: 'normalized_relation_header'
+          });
+        }
+        newRow[outKey] = value;
       }
 
       if (!newRow._model) newRow._model = rowModel;
@@ -86,7 +116,8 @@ export async function repairWorkbook(base64: string, filename?: string) {
       repaired_at: new Date().toISOString(),
       source_filename: filename || '',
       sheets: repairedSheets.length,
-      notes: 'Safe Repair menghapus kolom unknown/readonly dan mempertahankan _model/_external_id/__action.'
+      changes: issues.length,
+      notes: 'Safe Repair menghapus kolom unknown/readonly, menormalisasi model_id/id menjadi model_id_external_id, dan mempertahankan _model/_external_id/__action.'
     }
   ];
   const manifestWs = XLSX.utils.json_to_sheet(manifest);

@@ -1,0 +1,95 @@
+{
+  "name": "Lokalmart Standard Import Template",
+  "version": "2026-06-17.v3",
+  "files": {
+    "xlsx": "/templates/lokalmart_standard_import_template.xlsx",
+    "ai_contract_md": "/templates/lokalmart_ai_template_contract.md",
+    "manifest_json": "/templates/lokalmart_template_manifest.json"
+  },
+  "required_columns": [
+    "__action",
+    "_external_id",
+    "_model"
+  ],
+  "relation_columns": {
+    "many2one": "field_name_external_id",
+    "many2many": "field_name_external_ids"
+  },
+  "binary_image_column": "image_1920_base64",
+  "meta_column_prefixes": [
+    "_note",
+    "_comment",
+    "_ai",
+    "_source"
+  ],
+  "sheets": [
+    {
+      "sheet": "product.category",
+      "model": "product.category",
+      "depends_on": []
+    },
+    {
+      "sheet": "product.public.category",
+      "model": "product.public.category",
+      "depends_on": [
+        "product.public.category parent optional"
+      ]
+    },
+    {
+      "sheet": "res.partner",
+      "model": "res.partner",
+      "depends_on": []
+    },
+    {
+      "sheet": "product.template",
+      "model": "product.template",
+      "depends_on": [
+        "product.category",
+        "product.public.category"
+      ]
+    },
+    {
+      "sheet": "product.supplierinfo",
+      "model": "product.supplierinfo",
+      "depends_on": [
+        "res.partner",
+        "product.template"
+      ]
+    },
+    {
+      "sheet": "project.project",
+      "model": "project.project",
+      "depends_on": []
+    },
+    {
+      "sheet": "project.milestone",
+      "model": "project.milestone",
+      "depends_on": [
+        "project.project"
+      ]
+    },
+    {
+      "sheet": "project.task.type",
+      "model": "project.task.type",
+      "depends_on": [
+        "project.project optional"
+      ]
+    },
+    {
+      "sheet": "project.task",
+      "model": "project.task",
+      "depends_on": [
+        "project.project",
+        "project.milestone",
+        "project.task parent optional"
+      ]
+    },
+    {
+      "sheet": "knowledge.article",
+      "model": "knowledge.article",
+      "depends_on": [
+        "knowledge.article parent optional"
+      ]
+    }
+  ]
+}

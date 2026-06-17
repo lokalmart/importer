@@ -1,24 +1,104 @@
 import 'server-only';
 import { buildSchemaSnapshot } from './schemaScanner';
 import { parseWorkbookFromBase64, normalizeAction } from './xlsxWorkbook';
-import { ImportIssue, PreflightResult } from './types';
-
-const META_COLUMNS = new Set(['__action', '_external_id', '_model', '_note', '_comment']);
-
-function baseRelationField(header: string): string | null {
-  if (header.endsWith('_external_ids')) return header.replace(/_external_ids$/, '');
-  if (header.endsWith('_external_id')) return header.replace(/_external_id$/, '');
-  return null;
-}
+import { ImportIssue, PreflightResult, SchemaSnapshot, ModelSchema } from './types';
+import { isMetaColumn, normalizeHeader } from './importHeaders';
 
 function rowNum(index: number): number {
   return index + 2;
 }
 
-export async function runPreflight(base64: string, filename?: string): Promise<PreflightResult> {
+function looksTrue(value: unknown): boolean {
+  const raw = String(value || '').toLowerCase().trim();
+  return ['true', '1', 'yes', 'y', 'iya', 'ya'].includes(raw);
+}
+
+function looksEmpty(value: unknown): boolean {
+  return value === undefined || value === null || String(value).trim() === '';
+}
+
+function emptySnapshot(): SchemaSnapshot {
+  return {
+    ok: false,
+    exported_at: new Date().toISOString(),
+    target: { url_host: 'offline', db: 'offline', username: 'offline' },
+    models: {},
+    modelList: [],
+    externalIds: [],
+  };
+}
+
+function cloneSchema(snapshot?: SchemaSnapshot): SchemaSnapshot {
+  if (!snapshot) return emptySnapshot();
+  return {
+    ...snapshot,
+    models: { ...(snapshot.models || {}) },
+    modelList: [...(snapshot.modelList || [])],
+    externalIds: [...(snapshot.externalIds || [])],
+  };
+}
+
+function getOrCreateModel(snapshot: SchemaSnapshot, model: string, name?: string): ModelSchema {
+  if (!snapshot.models[model]) {
+    snapshot.models[model] = { model, name: name || model, state: model.startsWith('x_') ? 'manual' : undefined, fields: {} };
+    snapshot.modelList.push({ model, name: name || model, state: model.startsWith('x_') ? 'manual' : undefined });
+  }
+  return snapshot.models[model];
+}
+
+function enrichSnapshotFromWorkbook(snapshot: SchemaSnapshot, parsed: ReturnType<typeof parseWorkbookFromBase64>) {
+  const modelSheet = parsed.sheets.find((s) => s.inferredModel === 'ir.model' || s.name === 'ir.model');
+  if (modelSheet) {
+    for (const row of modelSheet.rows) {
+      const model = String(row.model || '').trim();
+      if (!model) continue;
+      getOrCreateModel(snapshot, model, String(row.name || model));
+    }
+  }
+
+  const fieldsSheet = parsed.sheets.find((s) => s.inferredModel === 'ir.model.fields' || s.name === 'ir.model.fields');
+  if (fieldsSheet) {
+    for (const row of fieldsSheet.rows) {
+      const model = String(row.model || '').trim();
+      const fieldName = String(row.name || '').trim();
+      if (!model || !fieldName) continue;
+      const target = getOrCreateModel(snapshot, model);
+      target.fields[fieldName] = {
+        name: fieldName,
+        string: String(row.field_description || fieldName),
+        type: String(row.ttype || 'char'),
+        relation: looksEmpty(row.relation) ? undefined : String(row.relation),
+        required: looksTrue(row.required),
+        readonly: looksTrue(row.readonly),
+        store: looksEmpty(row.store) ? true : looksTrue(row.store),
+      };
+    }
+  }
+}
+
+async function getSnapshot(parsed: ReturnType<typeof parseWorkbookFromBase64>, providedSnapshot?: SchemaSnapshot, issues?: ImportIssue[]): Promise<SchemaSnapshot> {
+  let snapshot = cloneSchema(providedSnapshot);
+  if (!providedSnapshot) {
+    try {
+      snapshot = await buildSchemaSnapshot('custom');
+    } catch (error) {
+      issues?.push({
+        level: 'warn',
+        message: `Live schema scan gagal, preflight memakai schema minimal dari workbook. Detail: ${error instanceof Error ? error.message : String(error)}`,
+        suggestion: 'Jalankan Schema Snapshot lagi bila ingin validasi field terhadap database nyata.',
+        code: 'schema_scan_failed_fallback',
+      });
+      snapshot = emptySnapshot();
+    }
+  }
+  enrichSnapshotFromWorkbook(snapshot, parsed);
+  return snapshot;
+}
+
+export async function runPreflight(base64: string, filename?: string, providedSnapshot?: SchemaSnapshot): Promise<PreflightResult> {
   const parsed = parseWorkbookFromBase64(base64, filename);
-  const snapshot = await buildSchemaSnapshot('custom');
   const issues: ImportIssue[] = [];
+  const snapshot = await getSnapshot(parsed, providedSnapshot, issues);
   let rowsChecked = 0;
 
   for (const sheet of parsed.sheets) {
@@ -33,7 +113,7 @@ export async function runPreflight(base64: string, filename?: string): Promise<P
         model,
         message: `Model ${model} belum ditemukan di schema snapshot.`,
         suggestion: model.startsWith('x_')
-          ? 'Pastikan sheet ir.model dan ir.model.fields berada sebelum data custom model, atau import model terlebih dahulu.'
+          ? 'Jika model dibuat di sheet ir.model file yang sama, ini boleh lanjut sebagai import bertahap.'
           : 'Periksa nama sheet/_model. Model core yang salah ketik harus diperbaiki sebelum import.',
         code: 'model_not_found'
       });
@@ -84,47 +164,49 @@ export async function runPreflight(base64: string, filename?: string): Promise<P
       const schema = snapshot.models[rowModel] || modelSchema;
       if (schema?.fields) {
         for (const header of sheet.headers) {
-          if (!header || META_COLUMNS.has(header)) continue;
-          const relationBase = baseRelationField(header);
-          const targetField = relationBase || header;
-          const fieldMeta = schema.fields[targetField];
+          if (!header || isMetaColumn(header)) continue;
+          const normalized = normalizeHeader(header, schema.fields[header]?.type);
+          const fieldMeta = schema.fields[normalized.field];
 
           if (!fieldMeta) {
+            // ir.model creates custom models; state is readonly in schema but accepted as intent in workbook and skipped at runtime.
+            const isSafeIrModelIntent = rowModel === 'ir.model' && ['state', 'transient'].includes(header);
             issues.push({
-              level: 'warn',
+              level: isSafeIrModelIntent ? 'info' : 'warn',
               sheet: sheet.name,
               row: rowNum(i),
               model: rowModel,
               field: header,
               message: `Field ${header} tidak ditemukan di model ${rowModel}.`,
-              suggestion: 'Kolom ini akan dihapus oleh Safe Repair, atau perbaiki nama field.',
+              suggestion: isSafeIrModelIntent ? 'Importer akan melewati field ini saat update/create bila Odoo tidak mengizinkan.' : 'Kolom ini akan dihapus/dinormalisasi oleh Safe Repair, atau perbaiki nama field.',
               code: 'unknown_field'
             });
             continue;
           }
 
           if (fieldMeta.readonly && row[header] !== '') {
+            const keepAsIntent = rowModel === 'ir.model' && header === 'state';
             issues.push({
-              level: 'warn',
+              level: keepAsIntent ? 'info' : 'warn',
               sheet: sheet.name,
               row: rowNum(i),
               model: rowModel,
               field: header,
               message: `Field ${header} readonly/computed.`,
-              suggestion: 'Kolom ini sebaiknya dihapus dari XLSX agar Odoo mengisinya otomatis.',
+              suggestion: keepAsIntent ? 'Untuk ir.model, importer akan menghindari update field readonly ini.' : 'Kolom ini sebaiknya dihapus dari XLSX agar Odoo mengisinya otomatis.',
               code: 'readonly_field'
             });
           }
 
-          if (relationBase && !['many2one', 'many2many'].includes(String(fieldMeta.type))) {
+          if (normalized.relation && !['many2one', 'many2many'].includes(String(fieldMeta.type))) {
             issues.push({
               level: 'warn',
               sheet: sheet.name,
               row: rowNum(i),
               model: rowModel,
               field: header,
-              message: `Kolom ${header} terlihat seperti external ID relation, tetapi ${targetField} bukan many2one/many2many.`,
-              suggestion: 'Pastikan suffix _external_id hanya untuk many2one dan _external_ids hanya untuk many2many.',
+              message: `Kolom ${header} terlihat seperti external ID relation, tetapi ${normalized.field} bukan many2one/many2many.`,
+              suggestion: 'Pastikan suffix _external_id atau /id hanya dipakai untuk field relasi.',
               code: 'relation_suffix_mismatch'
             });
           }
@@ -134,16 +216,16 @@ export async function runPreflight(base64: string, filename?: string): Promise<P
       if (rowModel === 'ir.model.fields') {
         const ttype = String(row.ttype || '').trim();
         const required = String(row.required || '').toLowerCase();
-        const ondelete = String(row.ondelete || row.on_delete || '').toLowerCase();
+        const ondelete = String(row.on_delete || row.ondelete || '').toLowerCase();
         if (ttype === 'many2one' && ['true', '1', 'yes'].includes(required) && (!ondelete || ondelete === 'set null' || ondelete === 'set_null')) {
           issues.push({
             level: 'error',
             sheet: sheet.name,
             row: rowNum(i),
             model: rowModel,
-            field: 'ondelete',
-            message: 'Many2one required tidak boleh memakai ondelete set null/kosong.',
-            suggestion: 'Isi ondelete/on_delete = restrict atau jadikan required = false.',
+            field: 'on_delete',
+            message: 'Many2one required tidak boleh memakai on_delete set null/kosong.',
+            suggestion: 'Isi on_delete = restrict atau jadikan required = false.',
             code: 'many2one_required_ondelete'
           });
         }
@@ -151,7 +233,6 @@ export async function runPreflight(base64: string, filename?: string): Promise<P
     }
   }
 
-  // Collapse repeated unknown/readonly warnings a bit for readability in UI.
   const seen = new Set<string>();
   const compacted: ImportIssue[] = [];
   for (const issue of issues) {

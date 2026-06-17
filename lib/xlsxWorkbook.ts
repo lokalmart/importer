@@ -82,9 +82,10 @@ export function emptyToUndefined(value: unknown): unknown {
 }
 
 export function normalizeAction(value: unknown): 'create' | 'update' | 'upsert' | 'archive' | 'skip' | 'delete' {
-  const raw = String(value || 'upsert').toLowerCase().trim();
+  const raw = String(value || 'upsert').toLowerCase().trim().replace(/[-\s]+/g, '_');
   if (raw === 'delete' || raw === 'unlink') return 'delete';
   if (raw === 'delete_soft' || raw === 'deactivate' || raw === 'archive') return 'archive';
+  if (raw === 'create_or_update' || raw === 'create_update' || raw === 'update_or_create' || raw === 'insert_or_update') return 'upsert';
   if (raw === 'create' || raw === 'update' || raw === 'upsert' || raw === 'skip') return raw;
   return 'upsert';
 }

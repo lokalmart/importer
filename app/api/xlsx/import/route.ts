@@ -19,7 +19,8 @@ export async function POST(req: NextRequest) {
   try {
     const body = Body.parse(await req.json());
     const result = await runImport(body.base64, { filename: body.filename, dryRun: body.dryRun, confirm: body.confirm });
-    return Response.json(result, { status: result.ok ? 200 : 400 });
+    // Row-level import errors are valid import reports. Keep HTTP 200 so UI can show logs.
+    return Response.json(result, { status: 200 });
   } catch (error) {
     return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

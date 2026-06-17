@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Archive, Bug, CheckCircle2, Database, FileSpreadsheet, KeyRound, Loader2, ShieldCheck, Sparkles, UploadCloud, Wrench } from 'lucide-react';
+import { Archive, BookOpen, Bug, Database, Download, FileSpreadsheet, FileText, KeyRound, Loader2, ShieldCheck, Sparkles, UploadCloud, Wrench } from 'lucide-react';
 
-type Tab = 'home' | 'import' | 'schema' | 'repair' | 'logs' | 'settings';
+type Tab = 'home' | 'templates' | 'import' | 'schema' | 'repair' | 'logs' | 'settings';
 
 type ApiState<T> = { loading: boolean; data?: T; error?: string };
 
@@ -61,6 +61,13 @@ type ImportResult = {
   skipped: number;
   errors: number;
   logs: Array<{ level: 'error' | 'warn' | 'info' | 'success'; sheet: string; row?: number; model?: string; action?: string; external_id?: string; message: string }>;
+};
+
+type HistoryEntry = {
+  id: string;
+  at: string;
+  filename: string;
+  result: ImportResult;
 };
 
 function cls(...items: Array<string | false | null | undefined>) {
@@ -121,12 +128,19 @@ export default function Page() {
   const [importResult, setImportResult] = useState<ApiState<ImportResult>>({ loading: false });
   const [schema, setSchema] = useState<ApiState<any>>({ loading: false });
   const [health, setHealth] = useState<ApiState<any>>({ loading: false });
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
 
   const headers = useMemo(() => ({ 'Content-Type': 'application/json', 'x-importer-token': token }), [token]);
 
   useEffect(() => {
     const saved = localStorage.getItem('lokalmart_importer_token') || '';
     setToken(saved);
+    try {
+      const rawHistory = localStorage.getItem('lokalmart_importer_history');
+      if (rawHistory) setHistory(JSON.parse(rawHistory).slice(0, 20));
+    } catch {
+      localStorage.removeItem('lokalmart_importer_history');
+    }
     fetch('/api/config')
       .then((r) => r.json())
       .then(setConfig)
@@ -140,8 +154,33 @@ export default function Page() {
   async function apiPost<T>(url: string, body: unknown): Promise<T> {
     const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
     const json = await res.json();
-    if (!res.ok || json.ok === false) throw new Error(json.error || 'Request gagal');
+    // `ok:false` can be a valid business result, for example blocked preflight or dry-run with row errors.
+    // Only HTTP failures or explicit `error` payloads should become request failures.
+    if (!res.ok || json.error) throw new Error(json.error || 'Request gagal');
     return json as T;
+  }
+
+  function rememberImportResult(result: ImportResult) {
+    const entry: HistoryEntry = { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, at: new Date().toISOString(), filename: fileName || 'workbook.xlsx', result };
+    setHistory((prev) => {
+      const next = [entry, ...prev].slice(0, 20);
+      localStorage.setItem('lokalmart_importer_history', JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function makeFailedRequestResult(message: string, dryRun: boolean): ImportResult {
+    return {
+      ok: false,
+      dryRun,
+      processed: 0,
+      created: 0,
+      updated: 0,
+      archived: 0,
+      skipped: 0,
+      errors: 1,
+      logs: [{ level: 'error', sheet: '-', message }],
+    };
   }
 
   async function analyzeFile(file: File) {
@@ -189,7 +228,7 @@ export default function Page() {
     if (!base64) return;
     setPreflight({ loading: true });
     try {
-      const data = await apiPost<Preflight>('/api/xlsx/preflight', { base64, filename: fileName });
+      const data = await apiPost<Preflight>('/api/xlsx/preflight', { base64, filename: fileName, schemaSnapshot: schema.data });
       setPreflight({ loading: false, data });
     } catch (e) {
       setPreflight({ loading: false, error: e instanceof Error ? e.message : String(e) });
@@ -202,6 +241,10 @@ export default function Page() {
     try {
       const data = await apiPost<RepairResult>('/api/xlsx/repair', { base64, filename: fileName });
       setRepair({ loading: false, data });
+      setBase64(data.base64);
+      setFileName(data.filename);
+      setPreflight({ loading: false });
+      setImportResult({ loading: false });
       setTab('repair');
     } catch (e) {
       setRepair({ loading: false, error: e instanceof Error ? e.message : String(e) });
@@ -214,15 +257,20 @@ export default function Page() {
     try {
       const data = await apiPost<ImportResult>('/api/xlsx/import', { base64, filename: fileName, dryRun, confirm: dryRun ? undefined : 'IMPORT_TO_ODOO' });
       setImportResult({ loading: false, data });
+      rememberImportResult(data);
       setTab('logs');
     } catch (e) {
-      setImportResult({ loading: false, error: e instanceof Error ? e.message : String(e) });
+      const message = e instanceof Error ? e.message : String(e);
+      const data = makeFailedRequestResult(message, dryRun);
+      setImportResult({ loading: false, error: message, data });
+      rememberImportResult(data);
       setTab('logs');
     }
   }
 
   const nav = [
     { id: 'home' as const, title: 'Cockpit', text: 'Ringkasan aman', icon: ShieldCheck },
+    { id: 'templates' as const, title: 'Templates', text: 'Standar AI', icon: BookOpen },
     { id: 'import' as const, title: 'Import XLSX', text: 'Upload dan preflight', icon: FileSpreadsheet },
     { id: 'schema' as const, title: 'Schema', text: 'Snapshot Odoo', icon: Database },
     { id: 'repair' as const, title: 'Repair', text: 'Buat patch aman', icon: Wrench },
@@ -270,8 +318,54 @@ export default function Page() {
                 <div className="screen">
                   <div className="cards">
                     <div className="box"><h3>Target Odoo</h3><p style={{ color: 'var(--muted)', lineHeight: 1.6 }}>{config?.target ? `${config.target.db} · ${config.target.url_host}` : config?.error || 'Memuat config...'}</p><button className="btn secondary" onClick={runHealth}>{health.loading ? 'Testing...' : 'Tes Koneksi'}</button></div>
+                    <div className="box"><h3>Template Resmi</h3><p style={{ color: 'var(--muted)' }}>Download standar XLSX untuk semua AI.</p><button className="btn" onClick={() => setTab('templates')}>Buka Templates</button></div>
                     <div className="box"><h3>Upload Cepat</h3><p style={{ color: 'var(--muted)' }}>Mulai dari file XLSX Lokalmart.</p><button className="btn" onClick={() => setTab('import')}>Buka Import</button></div>
                     <div className="box"><h3>Schema Snapshot</h3><p style={{ color: 'var(--muted)' }}>Baca model, field, dan external ID.</p><button className="btn secondary" onClick={() => { setTab('schema'); runSchema(); }}>Scan Schema</button></div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {tab === 'templates' && (
+              <motion.div key="templates" initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }}>
+                <div className="hero">
+                  <span className="badge safe">ai contract</span>
+                  <h2>Template Center Lokalmart</h2>
+                  <p>Standar statis yang harus diikuti semua AI saat membuat XLSX import. Download template, baca kontraknya, lalu gunakan sebagai acuan sebelum upload ke importer.</p>
+                </div>
+                <div className="screen">
+                  <div className="cards">
+                    <div className="box template-card">
+                      <FileSpreadsheet size={30} color="var(--green)" />
+                      <h3>Standard Import Template</h3>
+                      <p>Workbook utama berisi produk + foto, vendor, project, milestone, task/subtask, stage, dan knowledge article.</p>
+                      <a className="btn link-btn" href="/templates/lokalmart_standard_import_template.xlsx" download><Download size={16} /> Download XLSX</a>
+                    </div>
+                    <div className="box template-card">
+                      <FileText size={30} color="var(--blue)" />
+                      <h3>AI Template Contract</h3>
+                      <p>Instruksi markdown untuk ChatGPT/AI lain: aturan kolom, relasi, external ID, foto produk, dan larangan delete.</p>
+                      <a className="btn secondary link-btn" href="/templates/lokalmart_ai_template_contract.md" download><Download size={16} /> Download MD</a>
+                    </div>
+                    <div className="box template-card">
+                      <Database size={30} color="var(--yellow)" />
+                      <h3>Template Manifest</h3>
+                      <p>Daftar sheet, model, dependency, dan path file agar web app/AI bisa membaca standar secara mesin.</p>
+                      <a className="btn secondary link-btn" href="/templates/lokalmart_template_manifest.json" download><Download size={16} /> Download JSON</a>
+                    </div>
+                  </div>
+
+                  <div className="box" style={{ marginTop: 14 }}>
+                    <h3>Aturan singkat untuk AI</h3>
+                    <div className="list">
+                      <div className="item"><span>Identitas record</span><b>_external_id wajib untuk upsert</b></div>
+                      <div className="item"><span>Model target</span><b>_model tetap diisi walau nama sheet sama</b></div>
+                      <div className="item"><span>Many2one</span><b>field_name_external_id</b></div>
+                      <div className="item"><span>Many2many</span><b>field_name_external_ids</b></div>
+                      <div className="item"><span>Foto produk</span><b>image_1920_base64</b></div>
+                      <div className="item"><span>Task bertingkat</span><b>parent_id_external_id</b></div>
+                      <div className="item"><span>Larangan</span><b>delete fisik tidak boleh</b></div>
+                    </div>
                   </div>
                 </div>
               </motion.div>
@@ -354,7 +448,7 @@ export default function Page() {
                 <div className="screen">
                   <div className="actions"><button className="btn" onClick={runRepairClick} disabled={!base64 || repair.loading}>{repair.loading ? 'Membuat patch...' : 'Buat Patch Aman'}</button>{repair.data && <button className="btn secondary" onClick={() => downloadBase64Xlsx(repair.data!.base64, repair.data!.filename)}>Download Patch XLSX</button>}</div>
                   {repair.error && <p style={{ color: 'var(--red)' }}>{repair.error}</p>}
-                  {repair.data ? <><div className="cards"><div className="metric"><strong>{repair.data.changes}</strong><span>perubahan</span></div><div className="metric"><strong>{repair.data.filename}</strong><span>file patch</span></div><div className="metric"><strong>safe</strong><span>mode</span></div></div><div className="issue-list" style={{ marginTop: 14 }}>{repair.data.issues.slice(0, 80).map((issue, i) => <div className={cls('issue', issue.level)} key={i}><h4>{issue.sheet} row {issue.row} · {issue.field}</h4><p>{issue.message}</p></div>)}</div></> : <EmptyState icon={Wrench} title="Belum ada patch" text="Upload XLSX dulu, lalu tekan Auto Repair untuk membuat file aman." />}
+                  {repair.data ? <><div className="cards"><div className="metric"><strong>{repair.data.changes}</strong><span>perubahan</span></div><div className="metric"><strong>{repair.data.filename}</strong><span>file patch aktif</span></div><div className="metric"><strong>safe</strong><span>mode</span></div></div><p style={{ color: 'var(--green)', lineHeight: 1.6 }}>Patch ini sekarang otomatis menjadi workbook aktif. Dry-run berikutnya memakai file patch, bukan file lama.</p><div className="issue-list" style={{ marginTop: 14 }}>{repair.data.issues.slice(0, 80).map((issue, i) => <div className={cls('issue', issue.level)} key={i}><h4>{issue.sheet || '-'} {issue.row ? `row ${issue.row}` : ''} {issue.field ? `· ${issue.field}` : ''}</h4><p>{issue.message}</p></div>)}</div></> : <EmptyState icon={Wrench} title="Belum ada patch" text="Upload XLSX dulu, lalu tekan Auto Repair untuk membuat file aman." />}
                 </div>
               </motion.div>
             )}
@@ -366,6 +460,7 @@ export default function Page() {
                   <div className="actions"><button className="btn warn" onClick={() => runImportClick(true)} disabled={!base64 || importResult.loading}>Dry Run</button><button className="btn danger" onClick={() => runImportClick(false)} disabled={!base64 || importResult.loading || preflight.data?.status === 'blocked'}>Live Import</button>{importResult.data && <button className="btn secondary" onClick={() => downloadJson(importResult.data, `import_report_${fileName || 'lokalmart'}.json`)}>Download Report</button>}</div>
                   {importResult.error && <p style={{ color: 'var(--red)' }}>{importResult.error}</p>}
                   {importResult.data ? <><div className="cards"><div className="metric"><strong>{importResult.data.processed}</strong><span>processed</span></div><div className="metric"><strong>{importResult.data.created}/{importResult.data.updated}</strong><span>created/updated</span></div><div className="metric"><strong>{importResult.data.errors}</strong><span>errors</span></div></div><div className="log-list" style={{ marginTop: 14 }}>{importResult.data.logs.slice(0, 250).map((log, i) => <div className={cls('log', log.level)} key={i}><h4>{log.level.toUpperCase()} · {log.sheet} {log.row ? `row ${log.row}` : ''} {log.model ? `· ${log.model}` : ''}</h4><p>{log.message}</p>{log.external_id && <p className="code">{log.external_id}</p>}</div>)}</div></> : <EmptyState icon={Archive} title="Belum ada log" text="Jalankan dry-run dulu untuk melihat apa yang akan dibuat atau diupdate." />}
+                  {history.length > 0 && <div className="box" style={{ marginTop: 14 }}><h3>Riwayat lokal browser</h3><div className="list">{history.slice(0, 8).map((h) => <div className="item" key={h.id}><span>{new Date(h.at).toLocaleString()} · {h.filename}</span><b>{h.result.dryRun ? 'dry-run' : 'live'} · {h.result.errors} error</b></div>)}</div><div className="actions"><button className="btn secondary" onClick={() => downloadJson(history, 'lokalmart_import_history.json')}>Download History</button><button className="btn secondary" onClick={() => { localStorage.removeItem('lokalmart_importer_history'); setHistory([]); }}>Hapus History</button></div></div>}
                 </div>
               </motion.div>
             )}
