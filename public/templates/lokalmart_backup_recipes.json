@@ -1,0 +1,37 @@
+{
+  "version": "2026-06-17.v4",
+  "purpose": "Lokalmart Backup Center recipe manifest for AI and webapp usage.",
+  "restore_rule": "Every backup must include an importable XLSX using _external_id, _model, __action=upsert, and relation columns using *_external_id or *_external_ids.",
+  "recipes": [
+    {
+      "id": "backup_project_bundle",
+      "title": "Project Bundle",
+      "models": ["project.project", "project.milestone", "project.task.type", "project.tags", "project.task"],
+      "restore_priority": ["project.project", "project.milestone", "project.task.type", "project.tags", "project.task"]
+    },
+    {
+      "id": "backup_product_catalog_bundle",
+      "title": "Product Catalog Bundle",
+      "models": ["product.category", "product.public.category", "res.partner", "product.template", "product.supplierinfo"],
+      "restore_priority": ["product.category", "product.public.category", "res.partner", "product.template", "product.supplierinfo"]
+    },
+    {
+      "id": "backup_partner_umkm_bundle",
+      "title": "Partner / UMKM Bundle",
+      "models": ["res.partner.category", "res.partner"],
+      "restore_priority": ["res.partner.category", "res.partner"]
+    },
+    {
+      "id": "backup_knowledge_bundle",
+      "title": "Knowledge Bundle",
+      "models": ["knowledge.article"],
+      "restore_priority": ["knowledge.article"]
+    },
+    {
+      "id": "backup_important_all",
+      "title": "Full Important Backup",
+      "models": ["project.project", "project.milestone", "project.task.type", "project.tags", "project.task", "product.category", "product.public.category", "res.partner.category", "res.partner", "product.template", "product.supplierinfo", "knowledge.article"],
+      "restore_priority": ["product.category", "product.public.category", "res.partner.category", "res.partner", "project.project", "project.milestone", "project.task.type", "project.tags", "project.task", "product.template", "product.supplierinfo", "knowledge.article"]
+    }
+  ]
+}

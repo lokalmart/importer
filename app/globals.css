@@ -19,7 +19,7 @@ body {
     radial-gradient(circle at top right, rgba(56, 189, 248, .16), transparent 22rem),
     linear-gradient(135deg, #07111f 0%, #0f172a 48%, #111827 100%);
 }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 
@@ -63,7 +63,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .btn.danger { color: white; background: var(--red); }
 .field { display: grid; gap: 6px; margin-top: 12px; }
 .field label { color: var(--muted); font-size: 12px; }
-.field input { width: 100%; border: 1px solid var(--line); background: rgba(15,23,42,.72); color: var(--text); padding: 12px 14px; border-radius: 14px; outline: none; }
+.field input, .field select { width: 100%; border: 1px solid var(--line); background: rgba(15,23,42,.72); color: var(--text); padding: 12px 14px; border-radius: 14px; outline: none; }
 
 .box { background: rgba(15,23,42,.58); border: 1px solid var(--line); border-radius: 24px; padding: 16px; }
 .box h3 { margin: 0 0 10px; font-size: 16px; }

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Archive, BookOpen, Bug, Database, Download, FileSpreadsheet, FileText, KeyRound, Loader2, ShieldCheck, Sparkles, UploadCloud, Wrench } from 'lucide-react';
 
-type Tab = 'home' | 'templates' | 'import' | 'schema' | 'repair' | 'logs' | 'settings';
+type Tab = 'home' | 'templates' | 'import' | 'backup' | 'schema' | 'repair' | 'logs' | 'settings';
 
 type ApiState<T> = { loading: boolean; data?: T; error?: string };
 
@@ -70,6 +70,43 @@ type HistoryEntry = {
   result: ImportResult;
 };
 
+
+type BackupRecipe = {
+  id: string;
+  title: string;
+  description: string;
+  rootModel?: string;
+  models: string[];
+  importable: boolean;
+};
+
+type BackupPreview = {
+  ok: boolean;
+  recipe: BackupRecipe;
+  target: { url_host: string; db: string; username: string };
+  counts: Record<string, number>;
+  total: number;
+  limit: number;
+  warnings: string[];
+};
+
+type BackupRun = {
+  ok: boolean;
+  filename: string;
+  zipBase64: string;
+  xlsxFilename: string;
+  xlsxBase64: string;
+  summary: {
+    recipeId: string;
+    recipeTitle: string;
+    exportedAt: string;
+    counts: Record<string, number>;
+    sheets: string[];
+    generatedExternalIds: number;
+    warnings: string[];
+  };
+};
+
 function cls(...items: Array<string | false | null | undefined>) {
   return items.filter(Boolean).join(' ');
 }
@@ -88,6 +125,18 @@ async function fileToBase64(file: File): Promise<string> {
 function downloadBase64Xlsx(base64: string, filename: string) {
   const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
   const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+
+function downloadBase64File(base64: string, filename: string, type = 'application/octet-stream') {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const blob = new Blob([bytes], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -129,6 +178,11 @@ export default function Page() {
   const [schema, setSchema] = useState<ApiState<any>>({ loading: false });
   const [health, setHealth] = useState<ApiState<any>>({ loading: false });
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [recipes, setRecipes] = useState<ApiState<BackupRecipe[]>>({ loading: false });
+  const [backupRecipeId, setBackupRecipeId] = useState('backup_project_bundle');
+  const [backupLimit, setBackupLimit] = useState(100);
+  const [backupPreview, setBackupPreview] = useState<ApiState<BackupPreview>>({ loading: false });
+  const [backupRun, setBackupRun] = useState<ApiState<BackupRun>>({ loading: false });
 
   const headers = useMemo(() => ({ 'Content-Type': 'application/json', 'x-importer-token': token }), [token]);
 
@@ -145,6 +199,11 @@ export default function Page() {
       .then((r) => r.json())
       .then(setConfig)
       .catch((e) => setConfig({ ok: false, requiresToken: true, error: String(e) }));
+    setRecipes({ loading: true });
+    fetch('/api/backup/recipes', { headers: { 'x-importer-token': saved } })
+      .then((r) => r.json())
+      .then((j) => setRecipes({ loading: false, data: j.recipes || [] }))
+      .catch((e) => setRecipes({ loading: false, error: String(e) }));
   }, []);
 
   useEffect(() => {
@@ -268,10 +327,51 @@ export default function Page() {
     }
   }
 
+
+  async function loadRecipes() {
+    setRecipes({ loading: true });
+    try {
+      const res = await fetch('/api/backup/recipes', { headers: { 'x-importer-token': token } });
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || 'Gagal membaca backup recipes');
+      setRecipes({ loading: false, data: json.recipes || [] });
+    } catch (e) {
+      setRecipes({ loading: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function runBackupPreview() {
+    setBackupPreview({ loading: true });
+    setBackupRun({ loading: false });
+    try {
+      const data = await apiPost<BackupPreview>('/api/backup/preview', {
+        recipeId: backupRecipeId,
+        scope: { limit: backupLimit, includeSchema: true, includeRawJson: true },
+      });
+      setBackupPreview({ loading: false, data });
+    } catch (e) {
+      setBackupPreview({ loading: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function runBackupNow() {
+    setBackupRun({ loading: true });
+    try {
+      const data = await apiPost<BackupRun>('/api/backup/run', {
+        recipeId: backupRecipeId,
+        scope: { limit: backupLimit, includeSchema: true, includeRawJson: true },
+      });
+      setBackupRun({ loading: false, data });
+    } catch (e) {
+      setBackupRun({ loading: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   const nav = [
     { id: 'home' as const, title: 'Cockpit', text: 'Ringkasan aman', icon: ShieldCheck },
     { id: 'templates' as const, title: 'Templates', text: 'Standar AI', icon: BookOpen },
     { id: 'import' as const, title: 'Import XLSX', text: 'Upload dan preflight', icon: FileSpreadsheet },
+    { id: 'backup' as const, title: 'Backup', text: 'Restore-ready ZIP', icon: Archive },
     { id: 'schema' as const, title: 'Schema', text: 'Snapshot Odoo', icon: Database },
     { id: 'repair' as const, title: 'Repair', text: 'Buat patch aman', icon: Wrench },
     { id: 'logs' as const, title: 'Logs', text: 'Dry run & import', icon: Bug },
@@ -319,6 +419,7 @@ export default function Page() {
                   <div className="cards">
                     <div className="box"><h3>Target Odoo</h3><p style={{ color: 'var(--muted)', lineHeight: 1.6 }}>{config?.target ? `${config.target.db} · ${config.target.url_host}` : config?.error || 'Memuat config...'}</p><button className="btn secondary" onClick={runHealth}>{health.loading ? 'Testing...' : 'Tes Koneksi'}</button></div>
                     <div className="box"><h3>Template Resmi</h3><p style={{ color: 'var(--muted)' }}>Download standar XLSX untuk semua AI.</p><button className="btn" onClick={() => setTab('templates')}>Buka Templates</button></div>
+                    <div className="box"><h3>Backup Center</h3><p style={{ color: 'var(--muted)' }}>Export project, product, partner, knowledge sebagai ZIP restore-ready.</p><button className="btn" onClick={() => { setTab('backup'); loadRecipes(); }}>Buka Backup</button></div>
                     <div className="box"><h3>Upload Cepat</h3><p style={{ color: 'var(--muted)' }}>Mulai dari file XLSX Lokalmart.</p><button className="btn" onClick={() => setTab('import')}>Buka Import</button></div>
                     <div className="box"><h3>Schema Snapshot</h3><p style={{ color: 'var(--muted)' }}>Baca model, field, dan external ID.</p><button className="btn secondary" onClick={() => { setTab('schema'); runSchema(); }}>Scan Schema</button></div>
                   </div>
@@ -352,6 +453,12 @@ export default function Page() {
                       <h3>Template Manifest</h3>
                       <p>Daftar sheet, model, dependency, dan path file agar web app/AI bisa membaca standar secara mesin.</p>
                       <a className="btn secondary link-btn" href="/templates/lokalmart_template_manifest.json" download><Download size={16} /> Download JSON</a>
+                    </div>
+                    <div className="box template-card">
+                      <Archive size={30} color="var(--green)" />
+                      <h3>Backup Recipes</h3>
+                      <p>Manifest recipe backup agar AI tahu model apa saja yang masuk bundle project, product, partner, dan knowledge.</p>
+                      <a className="btn secondary link-btn" href="/templates/lokalmart_backup_recipes.json" download><Download size={16} /> Download JSON</a>
                     </div>
                   </div>
 
@@ -426,6 +533,45 @@ export default function Page() {
                       </div>
                     </>}
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {tab === 'backup' && (
+              <motion.div key="backup" initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }}>
+                <div className="hero">
+                  <span className="badge safe">backup center</span>
+                  <h2>Backup restore-ready, bukan arsip mati.</h2>
+                  <p>Pilih recipe, preview record yang akan diambil dari Odoo, lalu download ZIP berisi importable XLSX, raw JSON, external ID map, schema snapshot, dan restore plan.</p>
+                </div>
+                <div className="screen">
+                  <div className="box">
+                    <h3>Pilih Backup Recipe</h3>
+                    <div className="field"><label>Recipe</label><select value={backupRecipeId} onChange={(e) => { setBackupRecipeId(e.target.value); setBackupPreview({ loading: false }); setBackupRun({ loading: false }); }}>{(recipes.data || []).map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}</select></div>
+                    <div className="field"><label>Batas record per model</label><input type="number" min={1} max={2000} value={backupLimit} onChange={(e) => setBackupLimit(Number(e.target.value || 100))} /></div>
+                    {recipes.error && <p style={{ color: 'var(--red)' }}>{recipes.error}</p>}
+                    <div className="list" style={{ marginTop: 12 }}>
+                      {(recipes.data || []).filter((r) => r.id === backupRecipeId).map((r) => <div className="item" key={r.id}><span>{r.description}</span><b>{r.models.length} model</b></div>)}
+                    </div>
+                    <div className="actions"><button className="btn secondary" onClick={loadRecipes}>Refresh Recipes</button><button className="btn" onClick={runBackupPreview} disabled={backupPreview.loading}>{backupPreview.loading ? 'Preview...' : 'Preview Backup'}</button><button className="btn warn" onClick={runBackupNow} disabled={backupRun.loading}>{backupRun.loading ? 'Membuat backup...' : 'Run Backup ZIP'}</button></div>
+                  </div>
+
+                  {backupPreview.error && <p style={{ color: 'var(--red)' }}>{backupPreview.error}</p>}
+                  {backupPreview.data && <div className="box" style={{ marginTop: 14 }}>
+                    <h3>Preview</h3>
+                    <div className="cards"><div className="metric"><strong>{backupPreview.data.total}</strong><span>total records</span></div><div className="metric"><strong>{backupPreview.data.limit}</strong><span>limit/model</span></div><div className="metric"><strong>{backupPreview.data.target?.db}</strong><span>database</span></div></div>
+                    <div className="list" style={{ marginTop: 14 }}>{Object.entries(backupPreview.data.counts).map(([model, count]) => <div className="item" key={model}><span>{model}</span><b>{count} rows</b></div>)}</div>
+                    <div className="issue-list" style={{ marginTop: 14 }}>{backupPreview.data.warnings.map((w, i) => <div className="issue warn" key={i}><h4>CATATAN</h4><p>{w}</p></div>)}</div>
+                  </div>}
+
+                  {backupRun.error && <p style={{ color: 'var(--red)' }}>{backupRun.error}</p>}
+                  {backupRun.data ? <div className="box" style={{ marginTop: 14 }}>
+                    <h3>Backup Siap</h3>
+                    <div className="cards"><div className="metric"><strong>{Object.values(backupRun.data.summary.counts).reduce((a, b) => a + b, 0)}</strong><span>records</span></div><div className="metric"><strong>{backupRun.data.summary.sheets.length}</strong><span>sheets XLSX</span></div><div className="metric"><strong>{backupRun.data.summary.generatedExternalIds}</strong><span>generated xml ids</span></div></div>
+                    <p style={{ color: 'var(--muted)', lineHeight: 1.6 }}>ZIP berisi <span className="code">data/lokalmart_backup_importable.xlsx</span>, <span className="code">raw_records.json</span>, <span className="code">external_id_map.json</span>, <span className="code">schema_snapshot.json</span>, dan <span className="code">restore_plan.md</span>.</p>
+                    <div className="actions"><button className="btn" onClick={() => downloadBase64File(backupRun.data!.zipBase64, backupRun.data!.filename, 'application/zip')}>Download Backup ZIP</button><button className="btn secondary" onClick={() => downloadBase64Xlsx(backupRun.data!.xlsxBase64, backupRun.data!.xlsxFilename)}>Download Importable XLSX</button><button className="btn secondary" onClick={() => { setBase64(backupRun.data!.xlsxBase64); setFileName(backupRun.data!.xlsxFilename); setTab('import'); }}>Pakai XLSX Ini untuk Restore</button><button className="btn secondary" onClick={() => downloadJson(backupRun.data!.summary, 'backup_summary.json')}>Download Summary</button></div>
+                    {backupRun.data.summary.warnings.length > 0 && <div className="issue-list" style={{ marginTop: 14 }}>{backupRun.data.summary.warnings.map((w, i) => <div className="issue warn" key={i}><h4>WARNING</h4><p>{w}</p></div>)}</div>}
+                  </div> : !backupPreview.data && <EmptyState icon={Archive} title="Belum ada backup" text="Pilih recipe lalu preview. Setelah itu buat ZIP restore-ready." />}
                 </div>
               </motion.div>
             )}
