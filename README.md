@@ -1,78 +1,112 @@
-# Lokalmart Studio Importer v4 — Template Center + Backup Center
+# Lokalmart Studio Importer — v5 Audit & Safe Cleanup Center
 
-Next.js/Vercel web app untuk import XLSX ke Odoo melalui XML-RPC, dengan kredensial Odoo disimpan di Vercel Environment Variables.
+Next.js/Vercel web app untuk Import XLSX, Template Center, Backup Center, dan Audit & Safe Cleanup Odoo Lokalmart via XML-RPC.
 
-## Fitur utama
+## Fitur v5
 
-- Safe Import Cockpit
-- Odoo credentials via ENV server-side
-- Admin token protection
-- XLSX analyzer
-- Schema snapshot
-- Preflight validation
-- Auto Repair XLSX
-- Dry Run dan Live Import
-- Template Center untuk standar AI/XLSX Lokalmart
-- Backup Center restore-ready
-
-## Backup Center v4
-
-Backup Center membuat backup yang dapat diimport kembali. Output backup berisi:
-
-- `data/lokalmart_backup_importable.xlsx`
-- `data/raw_records.json`
-- `external_id_map.json`
-- `schema_snapshot.json`
-- `restore_plan.md`
-- `manifest.json`
-
-Flow restore paling aman:
-
-1. Buka menu Backup.
-2. Pilih recipe, misalnya `Project Bundle` atau `Product Catalog Bundle`.
-3. Klik `Preview Backup`.
-4. Klik `Run Backup ZIP`.
-5. Download ZIP atau klik `Pakai XLSX Ini untuk Restore`.
-6. Jalankan Preflight.
-7. Jalankan Dry Run.
-8. Live Import hanya setelah log aman.
-
-### Backup recipes
-
-- `backup_project_bundle` — project, milestone, stage, task, subtask, tags.
-- `backup_product_catalog_bundle` — product category, ecommerce category, product template, vendor, supplierinfo, foto base64 bila tersedia.
-- `backup_partner_umkm_bundle` — partner, vendor, UMKM, customer, role Lokalmart.
-- `backup_knowledge_bundle` — knowledge article, body, parent-child.
-- `backup_important_all` — gabungan data penting.
-
-Catatan: backup ini adalah backup data aplikatif via XML-RPC, bukan dump PostgreSQL. Untuk backup besar, pecah per recipe agar aman di Vercel serverless.
+- Import XLSX aman: analyze, preflight, repair, dry-run, live import.
+- Template Center: template XLSX resmi, AI contract, manifest, backup recipes.
+- Backup Center: export project/product/partner/knowledge sebagai ZIP restore-ready.
+- Audit & Safe Cleanup Center:
+  - scan custom model `x_*`;
+  - scan custom field `x_*` / `x_studio_*`;
+  - scan external ID Lokalmart/Studio orphan;
+  - scan access rule custom model;
+  - backup audit ZIP/XLSX sebelum cleanup;
+  - dry-run selected items;
+  - run hanya item `SAFE_DELETE` dan `SAFE_ARCHIVE`.
 
 ## ENV Vercel
 
 ```bash
 ODOO_URL=https://your-odoo-domain.odoo.com
 ODOO_DB=edu-lokalmart
-ODOO_USERNAME=your-user@example.com
+ODOO_USERNAME=your-admin-or-importer-user@example.com
 ODOO_PASSWORD=your-password-or-api-key
-IMPORTER_ADMIN_TOKEN=your-long-random-token
+IMPORTER_ADMIN_TOKEN=token-panjang-random
 IMPORT_BATCH_SIZE=25
 IMPORT_DEFAULT_MODULE=lokalmart_importer
 ```
 
-## Deploy
+## Cara deploy
 
-1. Extract ZIP.
-2. Push ke GitHub repo `lokalmart/importer`.
-3. Import/deploy ke Vercel.
-4. Isi ENV.
-5. Redeploy dengan Clear Build Cache.
+1. Upload semua file ke repo GitHub `lokalmart/importer`.
+2. Import/deploy ke Vercel.
+3. Pastikan Framework Preset = Next.js.
+4. Kosongkan Output Directory.
+5. Isi ENV.
+6. Redeploy dengan Clear Build Cache.
 
-## Template Center
+## Cleanup Safety
 
-File statis ada di:
+Cleanup tidak menjalankan delete massal. Pipeline yang benar:
+
+```text
+Scan Cleanup Candidates
+→ Backup Audit Report
+→ Select SAFE Items
+→ Dry Run Selected
+→ Run SAFE Cleanup
+→ Download Execution Report
+```
+
+Status yang boleh dieksekusi otomatis:
+
+- `SAFE_DELETE`: unlink hanya untuk item custom/manual kosong tanpa dependensi.
+- `SAFE_ARCHIVE`: nonaktifkan/arsip, bukan unlink fisik.
+
+Status yang tidak boleh dieksekusi otomatis:
+
+- `REVIEW_REQUIRED`
+- `BLOCKED`
+- `CORE_PROTECTED`
+
+## API Cleanup
+
+```text
+POST /api/cleanup/scan
+POST /api/cleanup/backup
+POST /api/cleanup/dry-run
+POST /api/cleanup/run
+```
+
+Body contoh:
+
+```json
+{
+  "scope": {
+    "mode": "all",
+    "limit": 120,
+    "includeCore": false
+  }
+}
+```
+
+Dry-run/run:
+
+```json
+{
+  "keys": ["custom_field:123"],
+  "scope": { "mode": "all", "limit": 120 },
+  "confirm": "CLEANUP_SELECTED_SAFE_ITEMS"
+}
+```
+
+## Static contracts
 
 - `/templates/lokalmart_standard_import_template.xlsx`
 - `/templates/lokalmart_ai_template_contract.md`
 - `/templates/lokalmart_template_manifest.json`
+- `/templates/lokalmart_backup_recipes.json`
+- `/templates/lokalmart_cleanup_safety_contract.md`
+- `/templates/lokalmart_cleanup_safety_manifest.json`
 
-Semua AI yang membuat XLSX untuk Lokalmart sebaiknya membaca contract dan template ini.
+## Validasi lokal
+
+Sudah dicek dengan:
+
+```bash
+npx tsc --noEmit
+```
+
+Catatan: `npm run build` di sandbox lokal sempat melewati compile/type-check/page generation, lalu timeout saat `Collecting build traces`. Di Vercel proses ini biasanya lanjut normal; bila Vercel memberi build log spesifik, patch file terkait.

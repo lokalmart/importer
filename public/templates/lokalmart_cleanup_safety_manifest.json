@@ -1,0 +1,23 @@
+{
+  "name": "Lokalmart Audit & Safe Cleanup Contract",
+  "version": "1.0.0",
+  "allowed_auto_execution_statuses": ["SAFE_DELETE", "SAFE_ARCHIVE"],
+  "blocked_statuses": ["REVIEW_REQUIRED", "BLOCKED", "CORE_PROTECTED"],
+  "pipeline": ["scan", "backup", "dry_run", "run_selected_safe_items", "download_report"],
+  "model_safe_delete_rules": [
+    "state must be manual",
+    "technical model must start with x_",
+    "record_count must be 0",
+    "relation_ref_count must be 0",
+    "access_ref_count must be 0",
+    "view_ref_count must be 0"
+  ],
+  "field_safe_delete_rules": [
+    "state must be manual",
+    "field name must start with x_ or x_studio_",
+    "field must not be required",
+    "value_count must be 0",
+    "view_ref_count must be 0"
+  ],
+  "access_rule_default_action": "archive_not_unlink"
+}

@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Archive, BookOpen, Bug, Database, Download, FileSpreadsheet, FileText, KeyRound, Loader2, ShieldCheck, Sparkles, UploadCloud, Wrench } from 'lucide-react';
+import { Archive, BookOpen, Bug, Database, Download, FileSpreadsheet, FileText, KeyRound, Loader2, ShieldCheck, Sparkles, Trash2, UploadCloud, Wrench } from 'lucide-react';
 
-type Tab = 'home' | 'templates' | 'import' | 'backup' | 'schema' | 'repair' | 'logs' | 'settings';
+type Tab = 'home' | 'templates' | 'import' | 'backup' | 'cleanup' | 'schema' | 'repair' | 'logs' | 'settings';
 
 type ApiState<T> = { loading: boolean; data?: T; error?: string };
 
@@ -107,6 +107,62 @@ type BackupRun = {
   };
 };
 
+
+type CleanupStatus = 'SAFE_DELETE' | 'SAFE_ARCHIVE' | 'REVIEW_REQUIRED' | 'BLOCKED' | 'CORE_PROTECTED';
+type CleanupMode = 'all' | 'models' | 'fields' | 'external_ids' | 'access';
+
+type CleanupItem = {
+  key: string;
+  type: 'custom_model' | 'custom_field' | 'external_id' | 'access_rule' | 'view_reference' | 'menu_action';
+  status: CleanupStatus;
+  model?: string;
+  recordId?: number;
+  fieldName?: string;
+  externalId?: string;
+  name?: string;
+  recordCount?: number;
+  valueCount?: number;
+  relationRefCount?: number;
+  viewRefCount?: number;
+  accessRefCount?: number;
+  reasons: string[];
+  suggestedAction: 'delete' | 'archive' | 'review' | 'none';
+  danger: 'low' | 'medium' | 'high' | 'protected';
+};
+
+type CleanupScan = {
+  ok: boolean;
+  scannedAt: string;
+  target: { url_host: string; db: string; username: string };
+  scope: { mode: CleanupMode; limit: number; includeCore: boolean };
+  summary: Record<CleanupStatus, number> & { total: number };
+  items: CleanupItem[];
+  warnings: string[];
+};
+
+type CleanupBackup = {
+  ok: boolean;
+  filename: string;
+  zipBase64: string;
+  reportFilename: string;
+  reportBase64: string;
+  summary: CleanupScan['summary'];
+};
+
+type CleanupExec = {
+  ok: boolean;
+  dryRun: boolean;
+  selected?: number;
+  executable?: number;
+  blocked?: number;
+  processed?: number;
+  deleted?: number;
+  archived?: number;
+  skipped?: number;
+  errors?: number;
+  logs: Array<{ level: 'info' | 'warn' | 'error' | 'success'; key: string; message: string }>;
+};
+
 function cls(...items: Array<string | false | null | undefined>) {
   return items.filter(Boolean).join(' ');
 }
@@ -183,6 +239,12 @@ export default function Page() {
   const [backupLimit, setBackupLimit] = useState(100);
   const [backupPreview, setBackupPreview] = useState<ApiState<BackupPreview>>({ loading: false });
   const [backupRun, setBackupRun] = useState<ApiState<BackupRun>>({ loading: false });
+  const [cleanupMode, setCleanupMode] = useState<CleanupMode>('all');
+  const [cleanupLimit, setCleanupLimit] = useState(120);
+  const [cleanupScan, setCleanupScan] = useState<ApiState<CleanupScan>>({ loading: false });
+  const [cleanupBackup, setCleanupBackup] = useState<ApiState<CleanupBackup>>({ loading: false });
+  const [cleanupExec, setCleanupExec] = useState<ApiState<CleanupExec>>({ loading: false });
+  const [selectedCleanupKeys, setSelectedCleanupKeys] = useState<string[]>([]);
 
   const headers = useMemo(() => ({ 'Content-Type': 'application/json', 'x-importer-token': token }), [token]);
 
@@ -367,11 +429,69 @@ export default function Page() {
     }
   }
 
+
+  function cleanupScope() {
+    return { mode: cleanupMode, limit: cleanupLimit, includeCore: false };
+  }
+
+  function toggleCleanupKey(key: string) {
+    setSelectedCleanupKeys((prev) => prev.includes(key) ? prev.filter((x) => x !== key) : [...prev, key]);
+  }
+
+  function selectSafeCleanupItems() {
+    const safe = (cleanupScan.data?.items || []).filter((item) => item.status === 'SAFE_DELETE' || item.status === 'SAFE_ARCHIVE').map((item) => item.key);
+    setSelectedCleanupKeys(safe);
+  }
+
+  async function runCleanupScan() {
+    setCleanupScan({ loading: true });
+    setCleanupBackup({ loading: false });
+    setCleanupExec({ loading: false });
+    setSelectedCleanupKeys([]);
+    try {
+      const data = await apiPost<CleanupScan>('/api/cleanup/scan', { scope: cleanupScope() });
+      setCleanupScan({ loading: false, data });
+    } catch (e) {
+      setCleanupScan({ loading: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function runCleanupBackup() {
+    setCleanupBackup({ loading: true });
+    try {
+      const data = await apiPost<CleanupBackup>('/api/cleanup/backup', { scope: cleanupScope() });
+      setCleanupBackup({ loading: false, data });
+    } catch (e) {
+      setCleanupBackup({ loading: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function runCleanupDryRun() {
+    setCleanupExec({ loading: true });
+    try {
+      const data = await apiPost<CleanupExec>('/api/cleanup/dry-run', { keys: selectedCleanupKeys, scope: cleanupScope() });
+      setCleanupExec({ loading: false, data });
+    } catch (e) {
+      setCleanupExec({ loading: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function runCleanupNow() {
+    setCleanupExec({ loading: true });
+    try {
+      const data = await apiPost<CleanupExec>('/api/cleanup/run', { keys: selectedCleanupKeys, confirm: 'CLEANUP_SELECTED_SAFE_ITEMS', scope: cleanupScope() });
+      setCleanupExec({ loading: false, data });
+    } catch (e) {
+      setCleanupExec({ loading: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   const nav = [
     { id: 'home' as const, title: 'Cockpit', text: 'Ringkasan aman', icon: ShieldCheck },
     { id: 'templates' as const, title: 'Templates', text: 'Standar AI', icon: BookOpen },
     { id: 'import' as const, title: 'Import XLSX', text: 'Upload dan preflight', icon: FileSpreadsheet },
     { id: 'backup' as const, title: 'Backup', text: 'Restore-ready ZIP', icon: Archive },
+    { id: 'cleanup' as const, title: 'Cleanup', text: 'Audit aman', icon: Trash2 },
     { id: 'schema' as const, title: 'Schema', text: 'Snapshot Odoo', icon: Database },
     { id: 'repair' as const, title: 'Repair', text: 'Buat patch aman', icon: Wrench },
     { id: 'logs' as const, title: 'Logs', text: 'Dry run & import', icon: Bug },
@@ -420,6 +540,7 @@ export default function Page() {
                     <div className="box"><h3>Target Odoo</h3><p style={{ color: 'var(--muted)', lineHeight: 1.6 }}>{config?.target ? `${config.target.db} · ${config.target.url_host}` : config?.error || 'Memuat config...'}</p><button className="btn secondary" onClick={runHealth}>{health.loading ? 'Testing...' : 'Tes Koneksi'}</button></div>
                     <div className="box"><h3>Template Resmi</h3><p style={{ color: 'var(--muted)' }}>Download standar XLSX untuk semua AI.</p><button className="btn" onClick={() => setTab('templates')}>Buka Templates</button></div>
                     <div className="box"><h3>Backup Center</h3><p style={{ color: 'var(--muted)' }}>Export project, product, partner, knowledge sebagai ZIP restore-ready.</p><button className="btn" onClick={() => { setTab('backup'); loadRecipes(); }}>Buka Backup</button></div>
+                    <div className="box"><h3>Audit & Cleanup</h3><p style={{ color: 'var(--muted)' }}>Scan model, field, external ID, dan access rule kotor tanpa delete brutal.</p><button className="btn secondary" onClick={() => setTab('cleanup')}>Buka Cleanup</button></div>
                     <div className="box"><h3>Upload Cepat</h3><p style={{ color: 'var(--muted)' }}>Mulai dari file XLSX Lokalmart.</p><button className="btn" onClick={() => setTab('import')}>Buka Import</button></div>
                     <div className="box"><h3>Schema Snapshot</h3><p style={{ color: 'var(--muted)' }}>Baca model, field, dan external ID.</p><button className="btn secondary" onClick={() => { setTab('schema'); runSchema(); }}>Scan Schema</button></div>
                   </div>
@@ -459,6 +580,12 @@ export default function Page() {
                       <h3>Backup Recipes</h3>
                       <p>Manifest recipe backup agar AI tahu model apa saja yang masuk bundle project, product, partner, dan knowledge.</p>
                       <a className="btn secondary link-btn" href="/templates/lokalmart_backup_recipes.json" download><Download size={16} /> Download JSON</a>
+                    </div>
+                    <div className="box template-card">
+                      <Trash2 size={30} color="var(--red)" />
+                      <h3>Cleanup Safety Contract</h3>
+                      <p>Aturan audit & cleanup agar AI tidak menyarankan delete brutal pada model, fields, dan access rule Odoo.</p>
+                      <a className="btn secondary link-btn" href="/templates/lokalmart_cleanup_safety_contract.md" download><Download size={16} /> Download MD</a>
                     </div>
                   </div>
 
@@ -572,6 +699,55 @@ export default function Page() {
                     <div className="actions"><button className="btn" onClick={() => downloadBase64File(backupRun.data!.zipBase64, backupRun.data!.filename, 'application/zip')}>Download Backup ZIP</button><button className="btn secondary" onClick={() => downloadBase64Xlsx(backupRun.data!.xlsxBase64, backupRun.data!.xlsxFilename)}>Download Importable XLSX</button><button className="btn secondary" onClick={() => { setBase64(backupRun.data!.xlsxBase64); setFileName(backupRun.data!.xlsxFilename); setTab('import'); }}>Pakai XLSX Ini untuk Restore</button><button className="btn secondary" onClick={() => downloadJson(backupRun.data!.summary, 'backup_summary.json')}>Download Summary</button></div>
                     {backupRun.data.summary.warnings.length > 0 && <div className="issue-list" style={{ marginTop: 14 }}>{backupRun.data.summary.warnings.map((w, i) => <div className="issue warn" key={i}><h4>WARNING</h4><p>{w}</p></div>)}</div>}
                   </div> : !backupPreview.data && <EmptyState icon={Archive} title="Belum ada backup" text="Pilih recipe lalu preview. Setelah itu buat ZIP restore-ready." />}
+                </div>
+              </motion.div>
+            )}
+
+
+            {tab === 'cleanup' && (
+              <motion.div key="cleanup" initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }}>
+                <div className="hero">
+                  <span className="badge conditional">audit & safe cleanup</span>
+                  <h2>Cleanup tanpa delete brutal.</h2>
+                  <p>Scan model custom, field custom, external ID, dan access rule. Hanya item SAFE_DELETE / SAFE_ARCHIVE yang bisa dieksekusi. Sisanya jadi laporan audit.</p>
+                </div>
+                <div className="screen">
+                  <div className="box">
+                    <h3>Audit Scope</h3>
+                    <div className="cards">
+                      <div className="field"><label>Mode scan</label><select value={cleanupMode} onChange={(e) => { setCleanupMode(e.target.value as CleanupMode); setCleanupScan({ loading: false }); setCleanupExec({ loading: false }); setSelectedCleanupKeys([]); }}><option value="all">All safe audits</option><option value="models">Custom Models x_*</option><option value="fields">Custom Fields x_*</option><option value="external_ids">External ID Lokalmart/Studio</option><option value="access">Access Rules custom model</option></select></div>
+                      <div className="field"><label>Batas item per kategori</label><input type="number" min={10} max={500} value={cleanupLimit} onChange={(e) => setCleanupLimit(Number(e.target.value || 120))} /></div>
+                    </div>
+                    <div className="actions"><button className="btn" onClick={runCleanupScan} disabled={cleanupScan.loading}>{cleanupScan.loading ? 'Scanning...' : 'Scan Cleanup Candidates'}</button><button className="btn secondary" onClick={runCleanupBackup} disabled={cleanupBackup.loading}>{cleanupBackup.loading ? 'Membuat backup...' : 'Backup Audit Report'}</button>{cleanupScan.data && <button className="btn secondary" onClick={selectSafeCleanupItems}>Select SAFE Items</button>}{cleanupScan.data && <button className="btn secondary" onClick={() => downloadJson(cleanupScan.data, `cleanup_scan_${cleanupScan.data!.target?.db || 'odoo'}.json`)}>Download Scan JSON</button>}</div>
+                    <p style={{ color: 'var(--muted)', lineHeight: 1.6 }}>Default scan tidak memasukkan core model. Untuk Odoo Lokalmart, cleanup otomatis hanya menyentuh custom/manual item yang terdeteksi aman.</p>
+                  </div>
+
+                  {cleanupScan.error && <p style={{ color: 'var(--red)' }}>{cleanupScan.error}</p>}
+                  {cleanupBackup.error && <p style={{ color: 'var(--red)' }}>{cleanupBackup.error}</p>}
+                  {cleanupBackup.data && <div className="box" style={{ marginTop: 14 }}>
+                    <h3>Backup Audit Siap</h3>
+                    <div className="cards"><div className="metric"><strong>{cleanupBackup.data.summary.SAFE_DELETE}</strong><span>safe delete</span></div><div className="metric"><strong>{cleanupBackup.data.summary.SAFE_ARCHIVE}</strong><span>safe archive</span></div><div className="metric"><strong>{cleanupBackup.data.summary.BLOCKED}</strong><span>blocked</span></div></div>
+                    <div className="actions"><button className="btn" onClick={() => downloadBase64File(cleanupBackup.data!.zipBase64, cleanupBackup.data!.filename, 'application/zip')}>Download Cleanup Backup ZIP</button><button className="btn secondary" onClick={() => downloadBase64Xlsx(cleanupBackup.data!.reportBase64, cleanupBackup.data!.reportFilename)}>Download Audit XLSX</button></div>
+                  </div>}
+
+                  {cleanupScan.data ? <div className="box" style={{ marginTop: 14 }}>
+                    <h3>Cleanup Findings</h3>
+                    <div className="cards"><div className="metric"><strong>{cleanupScan.data.summary.SAFE_DELETE}</strong><span>safe delete</span></div><div className="metric"><strong>{cleanupScan.data.summary.SAFE_ARCHIVE}</strong><span>safe archive</span></div><div className="metric"><strong>{cleanupScan.data.summary.REVIEW_REQUIRED}</strong><span>review</span></div><div className="metric"><strong>{cleanupScan.data.summary.BLOCKED}</strong><span>blocked</span></div><div className="metric"><strong>{cleanupScan.data.summary.CORE_PROTECTED}</strong><span>protected</span></div></div>
+                    <div className="actions"><button className="btn warn" onClick={runCleanupDryRun} disabled={!selectedCleanupKeys.length || cleanupExec.loading}>Dry Run Selected ({selectedCleanupKeys.length})</button><button className="btn danger" onClick={runCleanupNow} disabled={!selectedCleanupKeys.length || cleanupExec.loading}>Run SAFE Cleanup</button></div>
+                    <div className="issue-list" style={{ marginTop: 14 }}>{cleanupScan.data.warnings.map((w, i) => <div className="issue warn" key={i}><h4>SAFETY RULE</h4><p>{w}</p></div>)}</div>
+                    <div className="list" style={{ marginTop: 14 }}>{cleanupScan.data.items.slice(0, 250).map((item) => {
+                      const canSelect = item.status === 'SAFE_DELETE' || item.status === 'SAFE_ARCHIVE';
+                      return <label className="item" key={item.key} style={{ alignItems: 'flex-start', gap: 10, opacity: canSelect ? 1 : 0.72 }}><input type="checkbox" checked={selectedCleanupKeys.includes(item.key)} disabled={!canSelect} onChange={() => toggleCleanupKey(item.key)} style={{ marginTop: 4 }} /><span><b>{item.status}</b> · {item.type} · {item.model || item.externalId || item.name || '-'}{item.fieldName ? ` · ${item.fieldName}` : ''}<br /><small style={{ color: 'var(--muted)' }}>{item.reasons.slice(0, 3).join(' ')}</small></span><b>{item.suggestedAction}</b></label>;
+                    })}</div>
+                  </div> : <EmptyState icon={Trash2} title="Belum ada audit cleanup" text="Jalankan scan dulu. Setelah itu backup kandidat, dry-run selected, baru cleanup item yang aman." />}
+
+                  {cleanupExec.error && <p style={{ color: 'var(--red)' }}>{cleanupExec.error}</p>}
+                  {cleanupExec.data && <div className="box" style={{ marginTop: 14 }}>
+                    <h3>{cleanupExec.data.dryRun ? 'Dry Run Cleanup' : 'Cleanup Execution'}</h3>
+                    <div className="cards"><div className="metric"><strong>{cleanupExec.data.executable ?? cleanupExec.data.processed ?? 0}</strong><span>{cleanupExec.data.dryRun ? 'executable' : 'processed'}</span></div><div className="metric"><strong>{cleanupExec.data.blocked ?? cleanupExec.data.skipped ?? 0}</strong><span>{cleanupExec.data.dryRun ? 'blocked' : 'skipped'}</span></div><div className="metric"><strong>{cleanupExec.data.errors ?? 0}</strong><span>errors</span></div></div>
+                    <div className="log-list" style={{ marginTop: 14 }}>{cleanupExec.data.logs.map((log, i) => <div className={cls('log', log.level)} key={i}><h4>{log.level.toUpperCase()} · {log.key}</h4><p>{log.message}</p></div>)}</div>
+                    <div className="actions"><button className="btn secondary" onClick={() => downloadJson(cleanupExec.data!, cleanupExec.data!.dryRun ? 'cleanup_dry_run_report.json' : 'cleanup_execution_report.json')}>Download Cleanup Report</button></div>
+                  </div>}
                 </div>
               </motion.div>
             )}

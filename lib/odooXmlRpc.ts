@@ -50,6 +50,10 @@ export async function createOdooClient() {
     return executeKw<number[]>(model, 'search', [domain], { limit });
   }
 
+  async function searchCount(model: string, domain: unknown[] = []): Promise<number> {
+    return executeKw<number>(model, 'search_count', [domain]);
+  }
+
   async function read<T = Record<string, unknown>>(model: string, ids: number[], fields: string[] = []): Promise<T[]> {
     const kwargs: Record<string, unknown> = {};
     if (fields.length) kwargs.fields = fields;
@@ -64,6 +68,10 @@ export async function createOdooClient() {
     return executeKw<boolean>(model, 'write', [ids, values]);
   }
 
+  async function unlink(model: string, ids: number[]): Promise<boolean> {
+    return executeKw<boolean>(model, 'unlink', [ids]);
+  }
+
   return {
     env,
     uid,
@@ -72,9 +80,11 @@ export async function createOdooClient() {
     fieldsGet,
     searchRead,
     search,
+    searchCount,
     read,
     create,
     write,
+    unlink,
   };
 }
 
